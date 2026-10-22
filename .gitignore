@@ -5,4 +5,5 @@
 .env
 .env.*
 **/__debug*
+__debug*
 controller
