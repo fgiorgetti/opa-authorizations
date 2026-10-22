@@ -1,0 +1,7 @@
+.git
+*.md
+**/*_test.go
+.gitignore
+.idea
+.vscode
+*.iml
