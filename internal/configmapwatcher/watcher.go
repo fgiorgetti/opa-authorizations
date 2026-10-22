@@ -27,14 +27,20 @@ type Watcher struct {
 	client    kubernetes.Interface
 	namespace string
 	validator *validator.Validator
+	onUpdate  func()
 }
 
 // New creates a Watcher.
-func New(client kubernetes.Interface, namespace string, v *validator.Validator) *Watcher {
+func New(client kubernetes.Interface, namespace string, v *validator.Validator, onUpdate ...func()) *Watcher {
+	var cb func()
+	if len(onUpdate) > 0 {
+		cb = onUpdate[0]
+	}
 	return &Watcher{
 		client:    client,
 		namespace: namespace,
 		validator: v,
+		onUpdate:  cb,
 	}
 }
 
@@ -114,4 +120,7 @@ func (w *Watcher) handle(obj interface{}) {
 	w.validator.UpdateData(authz)
 	slog.Info("authorization data updated from ConfigMap",
 		"name", cm.Name, "namespace", cm.Namespace)
+	if w.onUpdate != nil {
+		w.onUpdate()
+	}
 }

@@ -1,14 +1,21 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes/fake"
+
 	"github.com/interconnect/opa-controller/internal/cache"
 )
+
+const testNamespace = "skupper"
 
 // newPopulatedCache returns a Cache pre-loaded with two entries.
 func newPopulatedCache() *cache.Cache {
@@ -31,7 +38,7 @@ func newPopulatedCache() *cache.Cache {
 }
 
 func TestAPIEndpoints_Populated(t *testing.T) {
-	srv := New(newPopulatedCache(), "127.0.0.1:0")
+	srv := New(newPopulatedCache(), fake.NewSimpleClientset(), testNamespace, "127.0.0.1:0")
 
 	req := httptest.NewRequest(http.MethodGet, "/api/endpoints", nil)
 	w := httptest.NewRecorder()
@@ -76,7 +83,7 @@ func TestAPIEndpoints_Populated(t *testing.T) {
 }
 
 func TestAPIEndpoints_EmptyCache(t *testing.T) {
-	srv := New(cache.New(), "127.0.0.1:0")
+	srv := New(cache.New(), fake.NewSimpleClientset(), testNamespace, "127.0.0.1:0")
 
 	req := httptest.NewRequest(http.MethodGet, "/api/endpoints", nil)
 	w := httptest.NewRecorder()
@@ -102,7 +109,7 @@ func TestAPIEndpoints_EmptyCache(t *testing.T) {
 }
 
 func TestRootHandler_StatusAndContent(t *testing.T) {
-	srv := New(newPopulatedCache(), "127.0.0.1:0")
+	srv := New(newPopulatedCache(), fake.NewSimpleClientset(), testNamespace, "127.0.0.1:0")
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	w := httptest.NewRecorder()
@@ -113,6 +120,11 @@ func TestRootHandler_StatusAndContent(t *testing.T) {
 	}
 
 	body := w.Body.String()
+
+	// Navigation links present.
+	if !strings.Contains(body, `href="/"`) || !strings.Contains(body, `href="/authorizations"`) {
+		t.Error("expected navigation links to / and /authorizations")
+	}
 
 	// Table column headers present.
 	for _, header := range []string{"Endpoint", "Type", "Allowed", "Violations"} {
@@ -140,5 +152,214 @@ func TestRootHandler_StatusAndContent(t *testing.T) {
 	// Violations comma-joined.
 	if !strings.Contains(body, "namespace not permitted, routing key denied") {
 		t.Error("expected page to contain comma-joined violations")
+	}
+}
+
+func doAuthzRequest(srv *http.Server, method, body string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(method, "/api/authorizations", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	srv.Handler.ServeHTTP(w, req)
+	return w
+}
+
+func TestGetAuthorizations_MissingConfigMap(t *testing.T) {
+	srv := New(cache.New(), fake.NewSimpleClientset(), testNamespace, "127.0.0.1:0")
+
+	w := doAuthzRequest(srv, http.MethodGet, "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if ct := w.Header().Get("Content-Type"); ct != "application/json" {
+		t.Fatalf("expected application/json, got %q", ct)
+	}
+	if body := strings.TrimSpace(w.Body.String()); body != "{}" {
+		t.Fatalf("expected {}, got %q", body)
+	}
+}
+
+func TestGetAuthorizations_MissingKey(t *testing.T) {
+	client := fake.NewSimpleClientset(&corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "van-authorizations", Namespace: testNamespace},
+		Data:       map[string]string{"other": "x"},
+	})
+	srv := New(cache.New(), client, testNamespace, "127.0.0.1:0")
+
+	w := doAuthzRequest(srv, http.MethodGet, "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if body := strings.TrimSpace(w.Body.String()); body != "{}" {
+		t.Fatalf("expected {}, got %q", body)
+	}
+}
+
+func TestGetAuthorizations_Existing(t *testing.T) {
+	raw := `{"ns1":{"provides":["a"],"requires":["b"]}}`
+	client := fake.NewSimpleClientset(&corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "van-authorizations", Namespace: testNamespace},
+		Data:       map[string]string{"authorizations.json": raw},
+	})
+	srv := New(cache.New(), client, testNamespace, "127.0.0.1:0")
+
+	w := doAuthzRequest(srv, http.MethodGet, "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var got AuthorizationsData
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+	if len(got["ns1"].Provides) != 1 || got["ns1"].Provides[0] != "a" {
+		t.Errorf("unexpected provides: %v", got["ns1"].Provides)
+	}
+	if len(got["ns1"].Requires) != 1 || got["ns1"].Requires[0] != "b" {
+		t.Errorf("unexpected requires: %v", got["ns1"].Requires)
+	}
+}
+
+func TestPutAuthorizations_CreatesConfigMap(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	srv := New(cache.New(), client, testNamespace, "127.0.0.1:0")
+
+	w := doAuthzRequest(srv, http.MethodPut, `{"ns1":{"provides":["a","b"],"requires":["c"]}}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if body := strings.TrimSpace(w.Body.String()); body != `{"status":"ok"}` {
+		t.Fatalf("unexpected body %q", body)
+	}
+
+	cm, err := client.CoreV1().ConfigMaps(testNamespace).Get(context.Background(), "van-authorizations", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("ConfigMap not created: %v", err)
+	}
+	var got AuthorizationsData
+	if err := json.Unmarshal([]byte(cm.Data["authorizations.json"]), &got); err != nil {
+		t.Fatalf("stored data is not valid JSON: %v", err)
+	}
+	if len(got["ns1"].Provides) != 2 || len(got["ns1"].Requires) != 1 {
+		t.Errorf("unexpected stored data: %+v", got)
+	}
+	if !strings.Contains(cm.Data["authorizations.json"], "\n  ") {
+		t.Errorf("expected indented JSON, got %q", cm.Data["authorizations.json"])
+	}
+}
+
+func TestPutAuthorizations_UpdatesExistingConfigMap(t *testing.T) {
+	client := fake.NewSimpleClientset(&corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "van-authorizations", Namespace: testNamespace},
+		Data: map[string]string{
+			"authorizations.json": `{"old":{"provides":["x"],"requires":[]}}`,
+			"keep":                "me",
+		},
+	})
+	srv := New(cache.New(), client, testNamespace, "127.0.0.1:0")
+
+	w := doAuthzRequest(srv, http.MethodPut, `{"new":{"provides":[],"requires":["y"]}}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	cm, err := client.CoreV1().ConfigMaps(testNamespace).Get(context.Background(), "van-authorizations", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("failed to get ConfigMap: %v", err)
+	}
+	var got AuthorizationsData
+	if err := json.Unmarshal([]byte(cm.Data["authorizations.json"]), &got); err != nil {
+		t.Fatalf("stored data is not valid JSON: %v", err)
+	}
+	if _, ok := got["old"]; ok {
+		t.Errorf("expected old namespace to be replaced")
+	}
+	if len(got["new"].Requires) != 1 || got["new"].Requires[0] != "y" {
+		t.Errorf("unexpected stored data: %+v", got)
+	}
+	if cm.Data["keep"] != "me" {
+		t.Errorf("expected unrelated key to be preserved")
+	}
+}
+
+func TestPutAuthorizations_NilSlicesStoredAsEmptyArrays(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	srv := New(cache.New(), client, testNamespace, "127.0.0.1:0")
+
+	w := doAuthzRequest(srv, http.MethodPut, `{"ns1":{}}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	cm, _ := client.CoreV1().ConfigMaps(testNamespace).Get(context.Background(), "van-authorizations", metav1.GetOptions{})
+	if strings.Contains(cm.Data["authorizations.json"], "null") {
+		t.Errorf("expected no null values, got %q", cm.Data["authorizations.json"])
+	}
+}
+
+func TestPutAuthorizations_BadRequests(t *testing.T) {
+	cases := map[string]string{
+		"invalid json":         `{not json`,
+		"empty body":           ``,
+		"not an object":        `[1,2]`,
+		"null":                 `null`,
+		"empty namespace":      `{"":{"provides":[],"requires":[]}}`,
+		"blank namespace":      `{"  ":{"provides":[],"requires":[]}}`,
+		"provides not array":   `{"ns":{"provides":"a","requires":[]}}`,
+		"requires not strings": `{"ns":{"provides":[],"requires":[1]}}`,
+		"unknown field":        `{"ns":{"provides":[],"requires":[],"extra":1}}`,
+		"trailing data":        `{"ns":{"provides":[],"requires":[]}} {}`,
+	}
+	for name, body := range cases {
+		t.Run(name, func(t *testing.T) {
+			client := fake.NewSimpleClientset()
+			srv := New(cache.New(), client, testNamespace, "127.0.0.1:0")
+
+			w := doAuthzRequest(srv, http.MethodPut, body)
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("expected 400, got %d", w.Code)
+			}
+			cms, _ := client.CoreV1().ConfigMaps(testNamespace).List(context.Background(), metav1.ListOptions{})
+			if len(cms.Items) != 0 {
+				t.Errorf("expected no ConfigMap to be created")
+			}
+		})
+	}
+}
+
+func TestAuthorizationsPage_StatusAndContent(t *testing.T) {
+	srv := New(cache.New(), fake.NewSimpleClientset(), testNamespace, "127.0.0.1:0")
+
+	req := httptest.NewRequest(http.MethodGet, "/authorizations", nil)
+	w := httptest.NewRecorder()
+	srv.Handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if ct := w.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
+		t.Fatalf("expected text/html Content-Type, got %q", ct)
+	}
+
+	body := w.Body.String()
+
+	// Header and navigation
+	if !strings.Contains(body, "OPA Controller — Authorizations") {
+		t.Error("expected page title / heading OPA Controller — Authorizations")
+	}
+	if !strings.Contains(body, `href="/"`) || !strings.Contains(body, `href="/authorizations"`) {
+		t.Error("expected navigation links to / and /authorizations")
+	}
+
+	// Form elements
+	for _, expected := range []string{
+		"new-namespace",
+		"new-provides",
+		"new-requires",
+		"Save Authorizations",
+		"Namespace",
+		"Provides",
+		"Requires",
+		"/api/authorizations",
+	} {
+		if !strings.Contains(body, expected) {
+			t.Errorf("expected authorizations page to contain %q", expected)
+		}
 	}
 }

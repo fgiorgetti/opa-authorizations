@@ -202,3 +202,172 @@ func TestController_Connector_AddAndUpdateAndDelete(t *testing.T) {
 		t.Fatalf("timed out waiting for connector to be deleted; cache entries: %+v", c.GetAll())
 	}
 }
+
+func findEntry(c *cache.Cache, namespace, name string) (cache.EndpointResult, bool) {
+	for _, e := range c.GetAll() {
+		if e.Namespace == namespace && e.Name == name {
+			return e, true
+		}
+	}
+	return cache.EndpointResult{}, false
+}
+
+func TestController_ReevaluateAll_BeforeRun(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := skupper.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme: %v", err)
+	}
+
+	v, err := validator.New()
+	if err != nil {
+		t.Fatalf("validator.New: %v", err)
+	}
+
+	c := cache.New()
+	ctrl := controller.New(fake.NewSimpleDynamicClient(scheme), v, c)
+
+	// Must not panic when informer stores are not yet initialised
+	ctrl.ReevaluateAll()
+
+	if n := len(c.GetAll()); n != 0 {
+		t.Fatalf("expected empty cache, got %d entries", n)
+	}
+}
+
+func TestController_ReevaluateAll_UpdatesCacheOnValidatorChange(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := skupper.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme: %v", err)
+	}
+
+	fakeClient := fake.NewSimpleDynamicClient(scheme)
+
+	v, err := validator.New()
+	if err != nil {
+		t.Fatalf("validator.New: %v", err)
+	}
+
+	// Initially nothing is authorized
+	v.UpdateData(map[string]interface{}{})
+
+	c := cache.New()
+	ctrl := controller.New(fakeClient, v, c)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go ctrl.Run(ctx)
+
+	listener := makeUnstructured(skupper.ListenerGVR, "Listener", "test-ns", "my-listener", "key-l")
+	if _, err = fakeClient.Resource(skupper.ListenerGVR).Namespace("test-ns").Create(ctx, listener, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("failed to create listener: %v", err)
+	}
+	connector := makeUnstructured(skupper.ConnectorGVR, "Connector", "test-ns", "my-connector", "key-c")
+	if _, err = fakeClient.Resource(skupper.ConnectorGVR).Namespace("test-ns").Create(ctx, connector, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("failed to create connector: %v", err)
+	}
+
+	// Both are denied initially
+	ok := waitFor(t, func() bool {
+		l, lok := findEntry(c, "test-ns", "my-listener")
+		cn, cok := findEntry(c, "test-ns", "my-connector")
+		return lok && cok && !l.Allowed && !cn.Allowed
+	})
+	if !ok {
+		t.Fatalf("timed out waiting for denied entries; cache entries: %+v", c.GetAll())
+	}
+
+	// Authorize both keys; cache must not change until ReevaluateAll is called
+	v.UpdateData(map[string]interface{}{
+		"test-ns": map[string]interface{}{
+			"requires": []interface{}{"key-l"},
+			"provides": []interface{}{"key-c"},
+		},
+	})
+	if l, _ := findEntry(c, "test-ns", "my-listener"); l.Allowed {
+		t.Fatalf("listener cache entry changed before ReevaluateAll")
+	}
+
+	ctrl.ReevaluateAll()
+
+	l, lok := findEntry(c, "test-ns", "my-listener")
+	cn, cok := findEntry(c, "test-ns", "my-connector")
+	if !lok || !cok {
+		t.Fatalf("expected both entries in cache after ReevaluateAll; cache entries: %+v", c.GetAll())
+	}
+	if l.Type != "Listener" || !l.Allowed || len(l.Violations) != 0 {
+		t.Errorf("listener not re-evaluated as allowed: %+v", l)
+	}
+	if cn.Type != "Connector" || !cn.Allowed || len(cn.Violations) != 0 {
+		t.Errorf("connector not re-evaluated as allowed: %+v", cn)
+	}
+
+	// Revoke authorization and re-evaluate
+	v.UpdateData(map[string]interface{}{})
+	ctrl.ReevaluateAll()
+
+	l, _ = findEntry(c, "test-ns", "my-listener")
+	cn, _ = findEntry(c, "test-ns", "my-connector")
+	if l.Allowed || len(l.Violations) == 0 {
+		t.Errorf("listener should be denied with violations after revoke: %+v", l)
+	}
+	if cn.Allowed || len(cn.Violations) == 0 {
+		t.Errorf("connector should be denied with violations after revoke: %+v", cn)
+	}
+}
+
+func TestController_ReevaluateAll_SkipsDeletedResources(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := skupper.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme: %v", err)
+	}
+
+	fakeClient := fake.NewSimpleDynamicClient(scheme)
+
+	v, err := validator.New()
+	if err != nil {
+		t.Fatalf("validator.New: %v", err)
+	}
+	v.UpdateData(map[string]interface{}{
+		"test-ns": map[string]interface{}{
+			"requires": []interface{}{"key-l"},
+		},
+	})
+
+	c := cache.New()
+	ctrl := controller.New(fakeClient, v, c)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go ctrl.Run(ctx)
+
+	listener := makeUnstructured(skupper.ListenerGVR, "Listener", "test-ns", "my-listener", "key-l")
+	if _, err = fakeClient.Resource(skupper.ListenerGVR).Namespace("test-ns").Create(ctx, listener, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("failed to create listener: %v", err)
+	}
+	ok := waitFor(t, func() bool {
+		e, found := findEntry(c, "test-ns", "my-listener")
+		return found && e.Allowed
+	})
+	if !ok {
+		t.Fatalf("timed out waiting for listener in cache; cache entries: %+v", c.GetAll())
+	}
+
+	if err = fakeClient.Resource(skupper.ListenerGVR).Namespace("test-ns").Delete(ctx, "my-listener", metav1.DeleteOptions{}); err != nil {
+		t.Fatalf("failed to delete listener: %v", err)
+	}
+	ok = waitFor(t, func() bool {
+		_, found := findEntry(c, "test-ns", "my-listener")
+		return !found
+	})
+	if !ok {
+		t.Fatalf("timed out waiting for listener removal; cache entries: %+v", c.GetAll())
+	}
+
+	ctrl.ReevaluateAll()
+
+	if _, found := findEntry(c, "test-ns", "my-listener"); found {
+		t.Fatalf("deleted listener was resurrected by ReevaluateAll; cache entries: %+v", c.GetAll())
+	}
+}

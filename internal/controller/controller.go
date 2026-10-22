@@ -5,6 +5,7 @@ package controller
 import (
 	"context"
 	"log/slog"
+	"sync"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/dynamic"
@@ -21,6 +22,10 @@ type Controller struct {
 	dynClient dynamic.Interface
 	validator *validator.Validator
 	cache     *cachepkg.Cache
+
+	mu             sync.RWMutex
+	listenerStore  cache.Store
+	connectorStore cache.Store
 }
 
 // New returns an initialised Controller.
@@ -39,6 +44,11 @@ func (c *Controller) Run(ctx context.Context) {
 
 	listenerInformer := factory.ForResource(skupper.ListenerGVR).Informer()
 	connectorInformer := factory.ForResource(skupper.ConnectorGVR).Informer()
+
+	c.mu.Lock()
+	c.listenerStore = listenerInformer.GetStore()
+	c.connectorStore = connectorInformer.GetStore()
+	c.mu.Unlock()
 
 	_, _ = listenerInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
@@ -74,6 +84,27 @@ func (c *Controller) Run(ctx context.Context) {
 	}
 
 	<-ctx.Done()
+}
+
+// ReevaluateAll re-runs policy evaluation for every Listener and Connector
+// currently held in the informer stores and updates the cache. It is a no-op
+// for resource types whose informer has not been started yet.
+func (c *Controller) ReevaluateAll() {
+	c.mu.RLock()
+	listenerStore := c.listenerStore
+	connectorStore := c.connectorStore
+	c.mu.RUnlock()
+
+	if listenerStore != nil {
+		for _, obj := range listenerStore.List() {
+			c.handleAddOrUpdate(obj, "Listener")
+		}
+	}
+	if connectorStore != nil {
+		for _, obj := range connectorStore.List() {
+			c.handleAddOrUpdate(obj, "Connector")
+		}
+	}
 }
 
 func (c *Controller) handleAddOrUpdate(obj interface{}, resType string) {
