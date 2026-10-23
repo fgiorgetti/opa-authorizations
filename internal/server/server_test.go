@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -8,6 +9,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/open-policy-agent/opa/v1/bundle"
+	"github.com/open-policy-agent/opa/v1/rego"
+	"github.com/open-policy-agent/opa/v1/storage/inmem"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
@@ -361,5 +365,112 @@ func TestAuthorizationsPage_StatusAndContent(t *testing.T) {
 		if !strings.Contains(body, expected) {
 			t.Errorf("expected authorizations page to contain %q", expected)
 		}
+	}
+}
+
+func fetchBundle(t *testing.T) []byte {
+	t.Helper()
+	srv := New(cache.New(), fake.NewSimpleClientset(), testNamespace, "127.0.0.1:0")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/bundle", nil)
+	w := httptest.NewRecorder()
+	srv.Handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if ct := w.Header().Get("Content-Type"); ct != "application/gzip" {
+		t.Fatalf("expected application/gzip, got %q", ct)
+	}
+	return w.Body.Bytes()
+}
+
+func TestAPIBundle_Content(t *testing.T) {
+	b, err := bundle.NewReader(bytes.NewReader(fetchBundle(t))).Read()
+	if err != nil {
+		t.Fatalf("response is not a valid bundle: %v", err)
+	}
+
+	if b.Manifest.Roots == nil || len(*b.Manifest.Roots) != 1 || (*b.Manifest.Roots)[0] != "interconnect" {
+		t.Errorf("unexpected manifest roots: %v", b.Manifest.Roots)
+	}
+	if len(b.Data) != 0 {
+		t.Errorf("expected no data in bundle, got %v", b.Data)
+	}
+
+	var found bool
+	for _, m := range b.Modules {
+		if strings.HasSuffix(m.Path, "_test.rego") {
+			t.Errorf("test module %q must not be bundled", m.Path)
+		}
+		if strings.HasSuffix(m.Path, "authz.rego") {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected authz.rego in the bundle")
+	}
+}
+
+func TestAPIBundle_EvaluatesWithConsumerData(t *testing.T) {
+	b, err := bundle.NewReader(bytes.NewReader(fetchBundle(t))).Read()
+	if err != nil {
+		t.Fatalf("response is not a valid bundle: %v", err)
+	}
+
+	store := inmem.NewFromObject(map[string]any{
+		"authorizations": map[string]any{
+			"ns1": map[string]any{
+				"provides": []any{"svc.*"},
+				"requires": []any{"db"},
+			},
+		},
+	})
+
+	cases := map[string]struct {
+		input   map[string]any
+		allowed bool
+	}{
+		"connector permitted": {map[string]any{"namespace": "ns1", "type": "Connector", "routing_key": "svc.a"}, true},
+		"listener permitted":  {map[string]any{"namespace": "ns1", "type": "Listener", "routing_key": "db"}, true},
+		"key not permitted":   {map[string]any{"namespace": "ns1", "type": "Connector", "routing_key": "db"}, false},
+		"unknown namespace":   {map[string]any{"namespace": "other", "type": "Connector", "routing_key": "svc.a"}, false},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			opts := []func(*rego.Rego){
+				rego.Query("data.interconnect.authz.allowed"),
+				rego.Store(store),
+			}
+			for _, m := range b.Modules {
+				opts = append(opts, rego.Module(m.Path, string(m.Raw)))
+			}
+			pq, err := rego.New(opts...).PrepareForEval(context.Background())
+			if err != nil {
+				t.Fatalf("prepare failed: %v", err)
+			}
+			rs, err := pq.Eval(context.Background(), rego.EvalInput(tc.input))
+			if err != nil {
+				t.Fatalf("eval failed: %v", err)
+			}
+			if len(rs) != 1 || len(rs[0].Expressions) != 1 {
+				t.Fatalf("unexpected result: %v", rs)
+			}
+			if got, _ := rs[0].Expressions[0].Value.(bool); got != tc.allowed {
+				t.Errorf("expected allowed=%v, got %v", tc.allowed, got)
+			}
+		})
+	}
+}
+
+func TestAPIBundle_MethodNotAllowed(t *testing.T) {
+	srv := New(cache.New(), fake.NewSimpleClientset(), testNamespace, "127.0.0.1:0")
+
+	req := httptest.NewRequest(http.MethodPost, "/api/bundle", nil)
+	w := httptest.NewRecorder()
+	srv.Handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d", w.Code)
 	}
 }

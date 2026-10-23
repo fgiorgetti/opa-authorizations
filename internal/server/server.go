@@ -1,19 +1,24 @@
 package server
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"html/template"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"strings"
 
+	"github.com/open-policy-agent/opa/v1/bundle"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 
+	opacontroller "github.com/interconnect/opa-controller"
 	"github.com/interconnect/opa-controller/internal/cache"
 )
 
@@ -21,7 +26,50 @@ const (
 	configMapName = "van-authorizations"
 	dataKey       = "authorizations.json"
 	maxBodyBytes  = 1 << 20
+	policiesDir   = "policies"
+	bundleRoot    = "interconnect"
 )
+
+// buildBundle packs the embedded policies (test files excluded) into a
+// gzipped tarball in the OPA bundle format.
+//
+// The bundle holds policies only. Its manifest claims the "interconnect" root,
+// so consumers keep ownership of data.authorizations, which the policies read
+// as {"<namespace>": {"provides": [...], "requires": [...]}}.
+func buildBundle() ([]byte, error) {
+	entries, err := fs.ReadDir(opacontroller.Policies, policiesDir)
+	if err != nil {
+		return nil, fmt.Errorf("reading embedded policies: %w", err)
+	}
+
+	roots := []string{bundleRoot}
+	b := bundle.Bundle{
+		Manifest: bundle.Manifest{Roots: &roots},
+		Data:     map[string]any{},
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || strings.HasSuffix(name, "_test.rego") {
+			continue
+		}
+		path := policiesDir + "/" + name
+		src, err := fs.ReadFile(opacontroller.Policies, path)
+		if err != nil {
+			return nil, fmt.Errorf("reading policy %s: %w", name, err)
+		}
+		b.Modules = append(b.Modules, bundle.ModuleFile{
+			URL:  path,
+			Path: path,
+			Raw:  src,
+		})
+	}
+
+	var buf bytes.Buffer
+	if err := bundle.NewWriter(&buf).Write(b); err != nil {
+		return nil, fmt.Errorf("writing bundle: %w", err)
+	}
+	return buf.Bytes(), nil
+}
 
 // NamespaceAuthz lists the routing keys a namespace may provide and require.
 type NamespaceAuthz struct {
@@ -400,6 +448,20 @@ func New(c *cache.Cache, client kubernetes.Interface, namespace, addr string) *h
 		w.Header().Set("Content-Type", "application/json")
 		if err := json.NewEncoder(w).Encode(results); err != nil {
 			http.Error(w, "json error", http.StatusInternalServerError)
+		}
+	})
+
+	mux.HandleFunc("GET /api/bundle", func(w http.ResponseWriter, r *http.Request) {
+		out, err := buildBundle()
+		if err != nil {
+			slog.Error("failed to build policy bundle", "error", err)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/gzip")
+		w.Header().Set("Content-Disposition", `attachment; filename="bundle.tar.gz"`)
+		if _, err := w.Write(out); err != nil {
+			slog.Error("failed to write bundle response", "error", err)
 		}
 	})
 
