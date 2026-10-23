@@ -1,0 +1,151 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: opa-authorizations
+  labels:
+    app.kubernetes.io/name: opa-authorizations
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: opa-authorizations
+  namespace: opa-authorizations
+  labels:
+    app.kubernetes.io/name: opa-authorizations
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: opa-authorizations
+  labels:
+    app.kubernetes.io/name: opa-authorizations
+rules:
+  - apiGroups: ["skupper.io"]
+    resources: ["listeners", "connectors"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: opa-authorizations
+  labels:
+    app.kubernetes.io/name: opa-authorizations
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: opa-authorizations
+subjects:
+  - kind: ServiceAccount
+    name: opa-authorizations
+    namespace: opa-authorizations
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: opa-authorizations
+  namespace: opa-authorizations
+  labels:
+    app.kubernetes.io/name: opa-authorizations
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["van-authorizations"]
+    verbs: ["get", "list", "watch", "update"]
+  # create cannot be restricted by resourceNames
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: opa-authorizations
+  namespace: opa-authorizations
+  labels:
+    app.kubernetes.io/name: opa-authorizations
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: opa-authorizations
+subjects:
+  - kind: ServiceAccount
+    name: opa-authorizations
+    namespace: opa-authorizations
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: opa-authorizations
+  namespace: opa-authorizations
+  labels:
+    app.kubernetes.io/name: opa-authorizations
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: opa-authorizations
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: opa-authorizations
+    spec:
+      serviceAccountName: opa-authorizations
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: controller
+          image: quay.io/fgiorgetti/opa-authorizations:latest
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 20
+            timeoutSeconds: 3
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: opa-authorizations
+  namespace: opa-authorizations
+  labels:
+    app.kubernetes.io/name: opa-authorizations
+spec:
+  type: LoadBalancer
+  selector:
+    app.kubernetes.io/name: opa-authorizations
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
