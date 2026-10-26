@@ -81,7 +81,7 @@ func main() {
 	cmWatcher := configmapwatcher.New(kubeClient, namespace, v, ctrl.ReevaluateAll)
 	go cmWatcher.Run(ctx)
 
-	srv := server.New(c, kubeClient, namespace, addr)
+	srv := server.New(c, kubeClient, v, namespace, addr)
 	go func() {
 		slog.Info("starting http server", "addr", addr)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {

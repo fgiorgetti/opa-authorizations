@@ -20,6 +20,7 @@ import (
 
 	opacontroller "github.com/interconnect/opa-controller"
 	"github.com/interconnect/opa-controller/internal/cache"
+	"github.com/interconnect/opa-controller/internal/validator"
 )
 
 const (
@@ -108,6 +109,49 @@ func parseAuthorizations(r io.Reader) (AuthorizationsData, error) {
 		data[ns] = a
 	}
 	return data, nil
+}
+
+// authorizeRequest is the body of POST /api/authorize.
+type authorizeRequest struct {
+	Namespace  string `json:"namespace"`
+	Type       string `json:"type"`
+	RoutingKey string `json:"routing_key"`
+}
+
+// authorizeResponse is the result of POST /api/authorize.
+type authorizeResponse struct {
+	Allowed    bool     `json:"allowed"`
+	Violations []string `json:"violations"`
+}
+
+// parseAuthorizeRequest validates and decodes an authorize payload. The type
+// is normalised to the values the policy understands: Connector or Listener.
+func parseAuthorizeRequest(r io.Reader) (authorizeRequest, error) {
+	dec := json.NewDecoder(r)
+	dec.DisallowUnknownFields()
+
+	var req authorizeRequest
+	if err := dec.Decode(&req); err != nil {
+		return authorizeRequest{}, err
+	}
+	if dec.More() {
+		return authorizeRequest{}, errors.New("unexpected trailing data")
+	}
+	if strings.TrimSpace(req.Namespace) == "" {
+		return authorizeRequest{}, errors.New("namespace must not be empty")
+	}
+	if strings.TrimSpace(req.RoutingKey) == "" {
+		return authorizeRequest{}, errors.New("routing_key must not be empty")
+	}
+	switch strings.ToLower(strings.TrimSpace(req.Type)) {
+	case "connector":
+		req.Type = "Connector"
+	case "listener":
+		req.Type = "Listener"
+	default:
+		return authorizeRequest{}, errors.New("type must be connector or listener")
+	}
+	return req, nil
 }
 
 const pageHTML = `<!DOCTYPE html>
@@ -417,7 +461,8 @@ var pageTmpl = template.Must(
 // New returns a configured *http.Server bound to addr.
 // The server is not started; callers do: go srv.ListenAndServe().
 // The client and namespace are used to read and write the van-authorizations ConfigMap.
-func New(c *cache.Cache, client kubernetes.Interface, namespace, addr string) *http.Server {
+// The validator answers POST /api/authorize with the live policy decision.
+func New(c *cache.Cache, client kubernetes.Interface, v *validator.Validator, namespace, addr string) *http.Server {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
@@ -521,6 +566,33 @@ func New(c *cache.Cache, client kubernetes.Interface, namespace, addr string) *h
 
 		w.Header().Set("Content-Type", "application/json")
 		io.WriteString(w, `{"status":"ok"}`)
+	})
+
+	mux.HandleFunc("POST /api/authorize", func(w http.ResponseWriter, r *http.Request) {
+		req, err := parseAuthorizeRequest(http.MaxBytesReader(w, r.Body, maxBodyBytes))
+		if err != nil {
+			http.Error(w, "invalid authorize request", http.StatusBadRequest)
+			return
+		}
+
+		allowed, violations, err := v.Evaluate(map[string]interface{}{
+			"namespace":   req.Namespace,
+			"type":        req.Type,
+			"routing_key": req.RoutingKey,
+		})
+		if err != nil {
+			slog.Error("failed to evaluate authorize request", "error", err)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		if violations == nil {
+			violations = []string{}
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(authorizeResponse{Allowed: allowed, Violations: violations}); err != nil {
+			slog.Error("failed to write authorize response", "error", err)
+		}
 	})
 
 	return &http.Server{

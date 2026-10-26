@@ -7,3 +7,4 @@
 **/__debug*
 __debug*
 controller
+__pycache__/

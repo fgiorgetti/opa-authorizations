@@ -17,9 +17,20 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 
 	"github.com/interconnect/opa-controller/internal/cache"
+	"github.com/interconnect/opa-controller/internal/validator"
 )
 
 const testNamespace = "skupper"
+
+// newTestValidator returns a Validator with no authorization data loaded.
+func newTestValidator(t *testing.T) *validator.Validator {
+	t.Helper()
+	v, err := validator.New()
+	if err != nil {
+		t.Fatalf("validator.New() failed: %v", err)
+	}
+	return v
+}
 
 // newPopulatedCache returns a Cache pre-loaded with two entries.
 func newPopulatedCache() *cache.Cache {
@@ -42,7 +53,7 @@ func newPopulatedCache() *cache.Cache {
 }
 
 func TestAPIEndpoints_Populated(t *testing.T) {
-	srv := New(newPopulatedCache(), fake.NewSimpleClientset(), testNamespace, "127.0.0.1:0")
+	srv := New(newPopulatedCache(), fake.NewSimpleClientset(), newTestValidator(t), testNamespace, "127.0.0.1:0")
 
 	req := httptest.NewRequest(http.MethodGet, "/api/endpoints", nil)
 	w := httptest.NewRecorder()
@@ -87,7 +98,7 @@ func TestAPIEndpoints_Populated(t *testing.T) {
 }
 
 func TestAPIEndpoints_EmptyCache(t *testing.T) {
-	srv := New(cache.New(), fake.NewSimpleClientset(), testNamespace, "127.0.0.1:0")
+	srv := New(cache.New(), fake.NewSimpleClientset(), newTestValidator(t), testNamespace, "127.0.0.1:0")
 
 	req := httptest.NewRequest(http.MethodGet, "/api/endpoints", nil)
 	w := httptest.NewRecorder()
@@ -113,7 +124,7 @@ func TestAPIEndpoints_EmptyCache(t *testing.T) {
 }
 
 func TestRootHandler_StatusAndContent(t *testing.T) {
-	srv := New(newPopulatedCache(), fake.NewSimpleClientset(), testNamespace, "127.0.0.1:0")
+	srv := New(newPopulatedCache(), fake.NewSimpleClientset(), newTestValidator(t), testNamespace, "127.0.0.1:0")
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	w := httptest.NewRecorder()
@@ -167,7 +178,7 @@ func doAuthzRequest(srv *http.Server, method, body string) *httptest.ResponseRec
 }
 
 func TestGetAuthorizations_MissingConfigMap(t *testing.T) {
-	srv := New(cache.New(), fake.NewSimpleClientset(), testNamespace, "127.0.0.1:0")
+	srv := New(cache.New(), fake.NewSimpleClientset(), newTestValidator(t), testNamespace, "127.0.0.1:0")
 
 	w := doAuthzRequest(srv, http.MethodGet, "")
 	if w.Code != http.StatusOK {
@@ -186,7 +197,7 @@ func TestGetAuthorizations_MissingKey(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "van-authorizations", Namespace: testNamespace},
 		Data:       map[string]string{"other": "x"},
 	})
-	srv := New(cache.New(), client, testNamespace, "127.0.0.1:0")
+	srv := New(cache.New(), client, newTestValidator(t), testNamespace, "127.0.0.1:0")
 
 	w := doAuthzRequest(srv, http.MethodGet, "")
 	if w.Code != http.StatusOK {
@@ -203,7 +214,7 @@ func TestGetAuthorizations_Existing(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "van-authorizations", Namespace: testNamespace},
 		Data:       map[string]string{"authorizations.json": raw},
 	})
-	srv := New(cache.New(), client, testNamespace, "127.0.0.1:0")
+	srv := New(cache.New(), client, newTestValidator(t), testNamespace, "127.0.0.1:0")
 
 	w := doAuthzRequest(srv, http.MethodGet, "")
 	if w.Code != http.StatusOK {
@@ -223,7 +234,7 @@ func TestGetAuthorizations_Existing(t *testing.T) {
 
 func TestPutAuthorizations_CreatesConfigMap(t *testing.T) {
 	client := fake.NewSimpleClientset()
-	srv := New(cache.New(), client, testNamespace, "127.0.0.1:0")
+	srv := New(cache.New(), client, newTestValidator(t), testNamespace, "127.0.0.1:0")
 
 	w := doAuthzRequest(srv, http.MethodPut, `{"ns1":{"provides":["a","b"],"requires":["c"]}}`)
 	if w.Code != http.StatusOK {
@@ -257,7 +268,7 @@ func TestPutAuthorizations_UpdatesExistingConfigMap(t *testing.T) {
 			"keep":                "me",
 		},
 	})
-	srv := New(cache.New(), client, testNamespace, "127.0.0.1:0")
+	srv := New(cache.New(), client, newTestValidator(t), testNamespace, "127.0.0.1:0")
 
 	w := doAuthzRequest(srv, http.MethodPut, `{"new":{"provides":[],"requires":["y"]}}`)
 	if w.Code != http.StatusOK {
@@ -285,7 +296,7 @@ func TestPutAuthorizations_UpdatesExistingConfigMap(t *testing.T) {
 
 func TestPutAuthorizations_NilSlicesStoredAsEmptyArrays(t *testing.T) {
 	client := fake.NewSimpleClientset()
-	srv := New(cache.New(), client, testNamespace, "127.0.0.1:0")
+	srv := New(cache.New(), client, newTestValidator(t), testNamespace, "127.0.0.1:0")
 
 	w := doAuthzRequest(srv, http.MethodPut, `{"ns1":{}}`)
 	if w.Code != http.StatusOK {
@@ -313,7 +324,7 @@ func TestPutAuthorizations_BadRequests(t *testing.T) {
 	for name, body := range cases {
 		t.Run(name, func(t *testing.T) {
 			client := fake.NewSimpleClientset()
-			srv := New(cache.New(), client, testNamespace, "127.0.0.1:0")
+			srv := New(cache.New(), client, newTestValidator(t), testNamespace, "127.0.0.1:0")
 
 			w := doAuthzRequest(srv, http.MethodPut, body)
 			if w.Code != http.StatusBadRequest {
@@ -328,7 +339,7 @@ func TestPutAuthorizations_BadRequests(t *testing.T) {
 }
 
 func TestAuthorizationsPage_StatusAndContent(t *testing.T) {
-	srv := New(cache.New(), fake.NewSimpleClientset(), testNamespace, "127.0.0.1:0")
+	srv := New(cache.New(), fake.NewSimpleClientset(), newTestValidator(t), testNamespace, "127.0.0.1:0")
 
 	req := httptest.NewRequest(http.MethodGet, "/authorizations", nil)
 	w := httptest.NewRecorder()
@@ -370,7 +381,7 @@ func TestAuthorizationsPage_StatusAndContent(t *testing.T) {
 
 func fetchBundle(t *testing.T) []byte {
 	t.Helper()
-	srv := New(cache.New(), fake.NewSimpleClientset(), testNamespace, "127.0.0.1:0")
+	srv := New(cache.New(), fake.NewSimpleClientset(), newTestValidator(t), testNamespace, "127.0.0.1:0")
 
 	req := httptest.NewRequest(http.MethodGet, "/api/bundle", nil)
 	w := httptest.NewRecorder()
@@ -464,7 +475,7 @@ func TestAPIBundle_EvaluatesWithConsumerData(t *testing.T) {
 }
 
 func TestAPIBundle_MethodNotAllowed(t *testing.T) {
-	srv := New(cache.New(), fake.NewSimpleClientset(), testNamespace, "127.0.0.1:0")
+	srv := New(cache.New(), fake.NewSimpleClientset(), newTestValidator(t), testNamespace, "127.0.0.1:0")
 
 	req := httptest.NewRequest(http.MethodPost, "/api/bundle", nil)
 	w := httptest.NewRecorder()
@@ -472,5 +483,162 @@ func TestAPIBundle_MethodNotAllowed(t *testing.T) {
 
 	if w.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("expected 405, got %d", w.Code)
+	}
+}
+
+func doAuthorizeRequest(srv *http.Server, method, body string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(method, "/api/authorize", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	srv.Handler.ServeHTTP(w, req)
+	return w
+}
+
+func newAuthorizeServer(t *testing.T) *http.Server {
+	t.Helper()
+	v := newTestValidator(t)
+	v.UpdateData(map[string]interface{}{
+		"ns1": map[string]interface{}{
+			"provides": []interface{}{"svc.*"},
+			"requires": []interface{}{"db"},
+		},
+	})
+	return New(cache.New(), fake.NewSimpleClientset(), v, testNamespace, "127.0.0.1:0")
+}
+
+func TestAPIAuthorize_Decisions(t *testing.T) {
+	cases := map[string]struct {
+		body       string
+		allowed    bool
+		violations int
+	}{
+		"connector allowed":  {`{"namespace":"ns1","type":"connector","routing_key":"svc.a"}`, true, 0},
+		"listener allowed":   {`{"namespace":"ns1","type":"listener","routing_key":"db"}`, true, 0},
+		"glob match":         {`{"namespace":"ns1","type":"connector","routing_key":"svc.deep"}`, true, 0},
+		"type upper case":    {`{"namespace":"ns1","type":"CONNECTOR","routing_key":"svc.a"}`, true, 0},
+		"type mixed case":    {`{"namespace":"ns1","type":"Listener","routing_key":"db"}`, true, 0},
+		"unknown namespace":  {`{"namespace":"other","type":"connector","routing_key":"svc.a"}`, false, 1},
+		"key not permitted":  {`{"namespace":"ns1","type":"connector","routing_key":"db"}`, false, 1},
+		"listener wrong key": {`{"namespace":"ns1","type":"listener","routing_key":"svc.a"}`, false, 1},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			srv := newAuthorizeServer(t)
+
+			w := doAuthorizeRequest(srv, http.MethodPost, tc.body)
+			if w.Code != http.StatusOK {
+				t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+			}
+			if ct := w.Header().Get("Content-Type"); ct != "application/json" {
+				t.Fatalf("expected application/json, got %q", ct)
+			}
+			var got struct {
+				Allowed    bool      `json:"allowed"`
+				Violations *[]string `json:"violations"`
+			}
+			if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+				t.Fatalf("failed to unmarshal response: %v", err)
+			}
+			if got.Allowed != tc.allowed {
+				t.Errorf("expected allowed=%v, got %v", tc.allowed, got.Allowed)
+			}
+			if got.Violations == nil {
+				t.Fatalf("expected violations to be an array, got null: %s", w.Body.String())
+			}
+			if len(*got.Violations) != tc.violations {
+				t.Errorf("expected %d violations, got %v", tc.violations, *got.Violations)
+			}
+		})
+	}
+}
+
+func TestAPIAuthorize_EmptyViolationsSerialisedAsArray(t *testing.T) {
+	srv := newAuthorizeServer(t)
+
+	w := doAuthorizeRequest(srv, http.MethodPost, `{"namespace":"ns1","type":"connector","routing_key":"svc.a"}`)
+	if !strings.Contains(w.Body.String(), `"violations":[]`) {
+		t.Errorf("expected empty violations array, got %q", w.Body.String())
+	}
+}
+
+func TestAPIAuthorize_FollowsLiveData(t *testing.T) {
+	v := newTestValidator(t)
+	srv := New(cache.New(), fake.NewSimpleClientset(), v, testNamespace, "127.0.0.1:0")
+	body := `{"namespace":"ns1","type":"connector","routing_key":"svc.a"}`
+
+	w := doAuthorizeRequest(srv, http.MethodPost, body)
+	if !strings.Contains(w.Body.String(), `"allowed":false`) {
+		t.Fatalf("expected denial before data is loaded, got %q", w.Body.String())
+	}
+
+	v.UpdateData(map[string]interface{}{
+		"ns1": map[string]interface{}{
+			"provides": []interface{}{"svc.a"},
+			"requires": []interface{}{},
+		},
+	})
+	w = doAuthorizeRequest(srv, http.MethodPost, body)
+	if !strings.Contains(w.Body.String(), `"allowed":true`) {
+		t.Errorf("expected allowed after data update, got %q", w.Body.String())
+	}
+}
+
+func TestAPIAuthorize_BadRequests(t *testing.T) {
+	cases := map[string]string{
+		"malformed json":    `{not json`,
+		"empty body":        ``,
+		"not an object":     `[1,2]`,
+		"unknown field":     `{"namespace":"ns1","type":"connector","routing_key":"a","extra":1}`,
+		"trailing data":     `{"namespace":"ns1","type":"connector","routing_key":"a"} {}`,
+		"invalid type":      `{"namespace":"ns1","type":"gateway","routing_key":"a"}`,
+		"empty type":        `{"namespace":"ns1","type":"","routing_key":"a"}`,
+		"missing type":      `{"namespace":"ns1","routing_key":"a"}`,
+		"empty namespace":   `{"namespace":"","type":"connector","routing_key":"a"}`,
+		"blank namespace":   `{"namespace":"  ","type":"connector","routing_key":"a"}`,
+		"missing namespace": `{"type":"connector","routing_key":"a"}`,
+		"empty routing key": `{"namespace":"ns1","type":"connector","routing_key":""}`,
+		"missing key":       `{"namespace":"ns1","type":"connector"}`,
+		"field wrong type":  `{"namespace":1,"type":"connector","routing_key":"a"}`,
+	}
+	for name, body := range cases {
+		t.Run(name, func(t *testing.T) {
+			srv := newAuthorizeServer(t)
+
+			w := doAuthorizeRequest(srv, http.MethodPost, body)
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("expected 400, got %d", w.Code)
+			}
+		})
+	}
+}
+
+func TestAPIAuthorize_BodyTooLarge(t *testing.T) {
+	srv := newAuthorizeServer(t)
+
+	body := `{"namespace":"ns1","type":"connector","routing_key":"` + strings.Repeat("a", maxBodyBytes) + `"}`
+	w := doAuthorizeRequest(srv, http.MethodPost, body)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestAPIAuthorize_MethodNotAllowed(t *testing.T) {
+	srv := newAuthorizeServer(t)
+
+	for _, method := range []string{http.MethodPut, http.MethodDelete} {
+		w := doAuthorizeRequest(srv, method, "")
+		if w.Code != http.StatusMethodNotAllowed {
+			t.Errorf("%s: expected 405, got %d", method, w.Code)
+		}
+	}
+}
+
+// GET falls through to the "GET /" catch-all, which answers 404 for any
+// path other than "/".
+func TestAPIAuthorize_GetNotFound(t *testing.T) {
+	srv := newAuthorizeServer(t)
+
+	w := doAuthorizeRequest(srv, http.MethodGet, "")
+	if w.Code != http.StatusNotFound {
+		t.Errorf("expected 404, got %d", w.Code)
 	}
 }

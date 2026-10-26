@@ -83,6 +83,7 @@ content is not valid JSON, the update is skipped and the previous data is kept.
 | GET    | `/api/authorizations` | Current content of `authorizations.json` (`{}` when missing).  |
 | PUT    | `/api/authorizations` | Replace the data. Creates the ConfigMap if it does not exist.  |
 | GET    | `/api/bundle`         | The policies as an OPA bundle (`bundle.tar.gz`).               |
+| POST   | `/api/authorize`      | Asks the policy if a namespace, type and routing key is allowed. |
 
 The `PUT` payload must be a JSON object in the shape shown above. Unknown fields,
 empty namespace names and trailing data are rejected with `400`. The body is
@@ -93,6 +94,31 @@ manifest claims the `interconnect` root. It carries no data, so a consumer
 supplies its own `data.authorizations` in the same shape and evaluates
 `data.interconnect.authz` with `input.namespace`, `input.type` and
 `input.routing_key`.
+
+#### Authorize request
+
+`POST /api/authorize` evaluates the policy with the current authorization data
+and returns the decision. The request body is:
+
+```json
+{"namespace": "team-a", "type": "connector", "routing_key": "orders"}
+```
+
+- All three fields are required and must be strings. `namespace` and
+  `routing_key` must not be blank.
+- `type` is `connector` or `listener`, in any letter case.
+- Unknown fields, trailing data and bodies over 1 MiB are rejected.
+
+The response is `200` with `Content-Type: application/json`:
+
+```json
+{"allowed": false, "violations": ["routing key 'orders' is not permitted for Listener in namespace 'team-a'"]}
+```
+
+A denial is a normal `200` response with `allowed` set to `false`.
+`violations` is always an array and is empty when the request is allowed.
+Invalid requests return `400` and evaluation failures return `500`. Both use a
+plain-text body, not JSON.
 
 ## Deploy
 
@@ -195,6 +221,36 @@ curl -s http://localhost:8080/api/endpoints
 Change `routingKey` to a value that is not in `provides` and the entry turns
 to `Allowed: false` with a violation message.
 
+### Python sample
+
+[`samples/python/check_authorization.py`](samples/python/check_authorization.py)
+asks for a namespace, an endpoint type (`connector` or `listener`) and a routing
+key, then calls `POST /api/authorize` and prints `ALLOWED` or `DENIED` with the
+violations. It needs Python 3 and no extra packages.
+
+With the port-forward from the previous section running:
+
+```bash
+python3 samples/python/check_authorization.py
+```
+
+The controller address is read from `OPA_AUTHZ_URL` (default
+`http://127.0.0.1:8080`). Only `http` and `https` URLs are accepted:
+
+```bash
+OPA_AUTHZ_URL=https://opa-authorizations.example.com python3 samples/python/check_authorization.py
+```
+
+The exit code is `0` when allowed, `3` when denied, `1` when the controller
+cannot be reached or answers with an error, and `2` when `OPA_AUTHZ_URL` is
+invalid.
+
+Run the sample tests with:
+
+```bash
+cd samples/python && python3 -m unittest
+```
+
 ### Remove
 
 ```bash
@@ -207,7 +263,9 @@ deleting the namespace removes it too.
 ### Evaluation limits
 
 - The HTTP API has no authentication or TLS, and `PUT /api/authorizations`
-  changes the policy data. The Service is a `LoadBalancer`, so the API may be
+  changes the policy data. `POST /api/authorize` has the same limit: anyone who
+  can reach the Service can query the decisions. The Service is a
+  `LoadBalancer`, so the API may be
   reachable outside the cluster. For anything beyond a short evaluation, change
   the Service to `ClusterIP` and put an authenticating proxy or ingress with TLS
   in front of it.
@@ -244,4 +302,5 @@ with `opa test policies/`, if the OPA CLI is installed.
 | `internal/server`            | HTTP handlers, HTML pages and the bundle builder.                |
 | `internal/skupper`           | Skupper `v2alpha1` types and resource definitions.               |
 | `policies`                   | Rego policy and its tests. Embedded by [`embed.go`](embed.go).   |
+| `samples/python`             | Python client for `POST /api/authorize` and its tests.           |
 | `deploy`                     | Kubernetes manifest.                                             |
