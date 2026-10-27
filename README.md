@@ -8,6 +8,10 @@ serves its policies as an OPA bundle so other applications can reuse them.
 This project is meant for quick evaluation. It reports on resources. It does not
 block or modify them.
 
+For a comparison of the ways to use these policies (embedded, REST and bundle,
+Gatekeeper), the lessons learned and a recommendation for the Skupper projects,
+see [`OPA-USAGE-GUIDE.md`](OPA-USAGE-GUIDE.md).
+
 ## How it works
 
 ```
@@ -259,6 +263,14 @@ policy does not allow. It reads the same `van-authorizations` ConfigMap and
 generates its Gatekeeper library from [`policies/authz.rego`](policies/authz.rego),
 so the decisions and messages match the controller. Scripts install and remove
 Gatekeeper and the policies.
+
+### OPA standalone sample
+
+[`samples/opa`](samples/opa/README.md) shows how to use the OPA binary directly
+without deploying the controller. Three scripts cover the full workflow: start
+the OPA server with the bundled policies, upload the authorization data from the
+`van-authorizations` ConfigMap, and interactively validate a namespace, type and
+routing key against the policy.
 
 ### Remove
 
