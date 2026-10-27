@@ -251,6 +251,15 @@ Run the sample tests with:
 cd samples/python && python3 -m unittest
 ```
 
+### Gatekeeper sample
+
+[`samples/gatekeeper`](samples/gatekeeper/README.md) uses OPA Gatekeeper as an
+admission controller to reject `Listener` and `Connector` resources that the
+policy does not allow. It reads the same `van-authorizations` ConfigMap and
+generates its Gatekeeper library from [`policies/authz.rego`](policies/authz.rego),
+so the decisions and messages match the controller. Scripts install and remove
+Gatekeeper and the policies.
+
 ### Remove
 
 ```bash
@@ -303,4 +312,5 @@ with `opa test policies/`, if the OPA CLI is installed.
 | `internal/skupper`           | Skupper `v2alpha1` types and resource definitions.               |
 | `policies`                   | Rego policy and its tests. Embedded by [`embed.go`](embed.go).   |
 | `samples/python`             | Python client for `POST /api/authorize` and its tests.           |
+| `samples/gatekeeper`         | Gatekeeper admission policy, adapter, tests and install scripts. |
 | `deploy`                     | Kubernetes manifest.                                             |

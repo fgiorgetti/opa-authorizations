@@ -1,0 +1,23 @@
+# gatekeeper-config.yaml
+# Configures Gatekeeper to sync v1/ConfigMap resources into its inventory cache.
+#
+# This allows the SkupperAuthorization ConstraintTemplate to read the
+# van-authorizations ConfigMap from data.inventory at admission time.
+#
+# Trade-off: Gatekeeper caches all ConfigMaps cluster-wide (subject to any
+# namespace exclusions in spec.match.excludedNamespaces on each Constraint).
+# For clusters with a large number of ConfigMaps this increases Gatekeeper's
+# memory footprint. The alternative (option B) is to inline the authorization
+# data as Constraint parameters, which removes the inventory dependency but
+# requires re-applying the Constraint whenever the data changes.
+apiVersion: config.gatekeeper.sh/v1alpha1
+kind: Config
+metadata:
+  name: config
+  namespace: gatekeeper-system
+spec:
+  sync:
+    syncOnly:
+      - group: ""
+        version: "v1"
+        kind: ConfigMap

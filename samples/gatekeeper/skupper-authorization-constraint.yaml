@@ -1,0 +1,22 @@
+# skupper-authorization-constraint.yaml
+# Applies the SkupperAuthorization policy to skupper.io Listener and Connector resources.
+#
+# enforcementAction options:
+#   deny    - reject non-compliant resources (default)
+#   dryrun  - allow but log violations
+#   warn    - allow and return a warning to the user
+#
+# configmap_namespace: namespace that holds the van-authorizations ConfigMap.
+# Defaults to "opa-authorizations" when absent.
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: SkupperAuthorization
+metadata:
+  name: skupper-authz
+spec:
+  enforcementAction: deny
+  match:
+    kinds:
+      - apiGroups: ["skupper.io"]
+        kinds: ["Listener", "Connector"]
+  parameters:
+    configmap_namespace: opa-authorizations
